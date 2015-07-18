@@ -1,4 +1,5 @@
-require 'rubygems'
+require 'ostruct'
+
 require 'llvm'
 require 'llvm/core/module'
 require 'llvm/core/type'
@@ -21,16 +22,19 @@ class Generator
 
   Block = Struct.new(:head, :tail)
 
-  attr_accessor :module, :current_function, :current_block, :blocks
+  attr_accessor :module, :current_function, :current_block, :blocks, :functions
   def initialize
-    @module     = LLVM::Module.new("bfcrb")
+    @module = LLVM::Module.new("bfcrb")
+    @functions = OpenStruct.new
 
-    @current_function = @module.functions.add("main", Type.function([LLVM::Int32, Type.pointer(PCHAR)], LLVM::Int32))
+    functions.printf = @module.functions.add('printf', Type.function([PCHAR], LLVM::Int32, varargs: true))
 
-    current_block = @current_function.basic_blocks.append("entry")
-    @blocks = [Block.new(current_block, current_block)]
+    functions.main = @module.functions.add("main", Type.function([LLVM::Int32, Type.pointer(PCHAR)], LLVM::Int32))
 
-    @printf = @module.functions.add('printf', Type.function([PCHAR], LLVM::Int32, varargs: true))
+    @current_function = functions.main
+
+    block = @current_function.basic_blocks.append("entry")
+    @blocks = [Block.new(block, block)]
   end
 
   def current_block
@@ -43,8 +47,10 @@ class Generator
     end
   end
 
-  def setup
-    @cell_init = @module.functions.add("cell_init", Type.function([CellPointer], Type.void)) do |f, cell_ptr|
+  def setup_cell_functions
+    functions.cell_init = @module.functions.add(
+        "cell_init",
+        Type.function([CellPointer], Type.void)) do |f, cell_ptr|
       f.basic_blocks.append.build do |b|
         cell = b.load(cell_ptr)
 
@@ -58,73 +64,58 @@ class Generator
       end
     end
 
-    @cell_alloc = @module.functions.add("cell_alloc", Type.function([], CellPointer)) do |f|
+    functions.cell_alloc = @module.functions.add(
+        "cell_alloc",
+        Type.function([], CellPointer)) do |f|
       f.basic_blocks.append.build do |b|
         b.ret(b.malloc(Cell))
       end
     end
 
-    @cell_next = @module.functions.add("cell_next", Type.function([CellPointer], CellPointer)) do |f, cell_ptr|
-      entry           = f.basic_blocks.append
-      initialize_next = f.basic_blocks.append
-      return_next     = f.basic_blocks.append
-
-      initialize_next.build do |b|
-        next_ptr = b.load(new_cell_pointer_ref(b))
-
-        nixt = b.insert_value(b.load(next_ptr), cell_ptr, 2, "next->prev = cell")
-        b.store(nixt, next_ptr)
-
-        cell = b.insert_value(b.load(cell_ptr), next_ptr, 1, "cell->next = next")
-        b.store(cell, cell_ptr)
-
-        b.ret(next_ptr)
-      end
-
-      return_next.build do |b|
-        b.ret(b.extract_value(b.load(cell_ptr), 1))
-      end
-
-      entry.build do |b|
-        b.cond(
-          b.icmp(:eq, b.extract_value(b.load(cell_ptr), 1), CellPointer.null),
-          initialize_next,
-          return_next)
-      end
+    functions.cell_next = @module.functions.add(
+        "cell_next",
+        Type.function([CellPointer], CellPointer)) do |f, cell_ptr|
+      generate_cell_moving_function f, cell_ptr, 1
     end
 
-    @cell_prev = @module.functions.add("cell_prev", Type.function([CellPointer], CellPointer)) do |f, cell_ptr|
-      entry           = f.basic_blocks.append
-      initialize_prev = f.basic_blocks.append
-      return_prev     = f.basic_blocks.append
+    functions.cell_prev = @module.functions.add(
+        "cell_prev",
+        Type.function([CellPointer], CellPointer)) do |f, cell_ptr|
+      generate_cell_moving_function f, cell_ptr, 2
+    end
+  end
 
-      initialize_prev.build do |b|
-        prev_ptr = b.load(new_cell_pointer_ref(b))
+  def generate_cell_moving_function f, cell_ptr, idx
+    entry           = f.basic_blocks.append
+    initialize      = f.basic_blocks.append
+    return_existing = f.basic_blocks.append
 
-        prev = b.insert_value(b.load(prev_ptr), cell_ptr, 1, "prev->next = cell")
-        b.store(prev, prev_ptr)
+    entry.build do |b|
+      b.cond(
+        b.icmp(:eq, b.extract_value(b.load(cell_ptr), idx), CellPointer.null),
+        initialize,
+        return_existing)
+    end
 
-        cell = b.insert_value(b.load(cell_ptr), prev_ptr, 2, "cell->prev = prev")
-        b.store(cell, cell_ptr)
+    initialize.build do |b|
+      prev_ptr = b.load(new_cell_pointer_ref(b))
 
-        b.ret(prev_ptr)
-      end
+      prev = b.insert_value(b.load(prev_ptr), cell_ptr, 3-idx)
+      b.store(prev, prev_ptr)
 
-      return_prev.build do |b|
-        b.ret(b.extract_value(b.load(cell_ptr), 2))
-      end
+      cell = b.insert_value(b.load(cell_ptr), prev_ptr, idx)
+      b.store(cell, cell_ptr)
 
-      entry.build do |b|
-        b.cond(
-          b.icmp(:eq, b.extract_value(b.load(cell_ptr), 2), CellPointer.null),
-          initialize_prev,
-          return_prev)
-      end
+      b.ret(prev_ptr)
+    end
+
+    return_existing.build do |b|
+      b.ret(b.extract_value(b.load(cell_ptr), idx))
     end
   end
 
   def start
-    setup
+    setup_cell_functions
 
     current_block.build do |b|
       @ppcell = new_cell_pointer_ref b
@@ -133,8 +124,8 @@ class Generator
 
   def new_cell_pointer_ref b
     cell_ptr_ptr = b.alloca(CellPointer)
-    b.store(b.call(@cell_alloc), cell_ptr_ptr)
-    b.call(@cell_init, b.load(cell_ptr_ptr))
+    b.store(b.call(functions.cell_alloc), cell_ptr_ptr)
+    b.call(functions.cell_init, b.load(cell_ptr_ptr))
 
     cell_ptr_ptr
   end
@@ -170,13 +161,13 @@ class Generator
 
   def forward
     current_block.build do |b|
-      b.store(b.call(@cell_next, b.load(@ppcell)), @ppcell)
+      b.store(b.call(functions.cell_next, b.load(@ppcell)), @ppcell)
     end
   end
 
   def rewind
     current_block.build do |b|
-      b.store(b.call(@cell_prev, b.load(@ppcell)), @ppcell)
+      b.store(b.call(functions.cell_prev, b.load(@ppcell)), @ppcell)
     end
   end
 
@@ -212,7 +203,7 @@ class Generator
 
   def write
     current_block.build do |b|
-      b.call(@printf, b.global_string_pointer("%c"), current_value(b))
+      b.call(functions.printf, b.global_string_pointer("%c"), current_value(b))
     end
   end
 
