@@ -19,15 +19,22 @@ class Generator
 
   CellPointer = Type.pointer(Cell)
 
+  Block = Struct.new(:head, :tail)
+
   attr_accessor :module, :current_function, :current_block, :blocks
   def initialize
     @module     = LLVM::Module.new("bfcrb")
 
     @current_function = @module.functions.add("main", Type.function([LLVM::Int32, Type.pointer(PCHAR)], LLVM::Int32))
-    @current_block = @current_function.basic_blocks.append("entry")
-    @blocks = []
+
+    current_block = @current_function.basic_blocks.append("entry")
+    @blocks = [Block.new(current_block, current_block)]
 
     @printf = @module.functions.add('printf', Type.function([PCHAR], LLVM::Int32, varargs: true))
+  end
+
+  def current_block
+    blocks.last.tail
   end
 
   def save filename
@@ -143,22 +150,19 @@ class Generator
   end
 
   def increment
-    current_block.build do |b|
-      pcell = b.load(@ppcell)
-      cell = b.load(pcell)
-
-      cell = b.insert_value(cell, b.add(b.extract_value(cell, 0), CellType.from_i(1)), 0)
-
-      b.store(cell, pcell)
-    end
+    apply_delta_to_current_value 1
   end
 
   def decrement
+    apply_delta_to_current_value -1
+  end
+
+  def apply_delta_to_current_value delta
     current_block.build do |b|
       pcell = b.load(@ppcell)
       cell = b.load(pcell)
 
-      cell = b.insert_value(cell, b.sub(b.extract_value(cell, 0), CellType.from_i(1)), 0)
+      cell = b.insert_value(cell, b.add(b.extract_value(cell, 0), CellType.from_i(delta)), 0)
 
       b.store(cell, pcell)
     end
@@ -177,18 +181,18 @@ class Generator
   end
 
   def loop_start
-    blocks.push(current_block)
-    @current_block = current_function.basic_blocks.append
+    loop_block = current_function.basic_blocks.append
+
+    blocks.push(Block.new(loop_block, loop_block))
   end
 
   def loop_finish
-    loop_block = current_block
-    @current_block = blocks.pop
+    loop_block = blocks.pop
 
     escape_block = current_function.basic_blocks.append
     check = current_function.basic_blocks.append
 
-    loop_block.build do |b|
+    loop_block.tail.build do |b|
       b.br(check)
     end
 
@@ -200,10 +204,10 @@ class Generator
       b.cond(
         b.icmp(:eq, current_value(b), CellType.from_i(0)),
         escape_block,
-        loop_block)
+        loop_block.head)
     end
 
-    @current_block = escape_block
+    blocks.last.tail = escape_block
   end
 
   def write
