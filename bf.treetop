@@ -1,10 +1,10 @@
 grammar Brainfuck
+  rule program
+    script:sequence <Program>
+  end
+
   rule sequence
-    statements:statement* {
-      def to_ast
-        Sequence.new statements.elements.map(&:to_ast)
-      end
-    }
+    statements:statement* <Sequence>
   end
 
   rule statement
@@ -14,7 +14,7 @@ grammar Brainfuck
   end
 
   rule comment
-    [^,.<>\[\]+-]+ { def to_ast; Comment.new end }
+    [^,.<>\[\]+-]+
   end
 
   rule real_statement
@@ -22,34 +22,30 @@ grammar Brainfuck
   end
 
   rule while
-    '[' sequence ']' {
-      def to_ast
-        While.new sequence.to_ast
-      end
-    }
+    '[' body:sequence ']' <While>
   end
 
   rule inc
-    '+' { def to_ast; Increment.new end }
+    '+' <Increment>
   end
 
   rule dec
-    '-' { def to_ast; Decrement.new end }
+    '-' <Decrement>
   end
 
   rule read
-    ',' { def to_ast; Read.new end }
+    ',' <Read>
   end
 
   rule write
-    '.' { def to_ast; Write.new end }
+    '.' <Write>
   end
 
   rule fwd
-    '>' { def to_ast; Forward.new end }
+    '>' <Forward>
   end
 
   rule rwd
-    '<' { def to_ast; Rewind.new end }
+    '<' <Rewind>
   end
 end
