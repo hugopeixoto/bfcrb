@@ -73,7 +73,7 @@ parser = Treetop.load('bf').new
 Generator.new.tap do |g|
   parser.parse(File.read(ARGV[0])).codegen g
 
-  g.save "bf.bc"
+  g.save ARGV[1]
 end
 
 

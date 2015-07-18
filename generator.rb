@@ -41,9 +41,17 @@ class Generator
     blocks.last.tail
   end
 
-  def save filename
-    File.open(filename, "w") do |file|
+  def save filename=nil
+    filename ||= 'a.out'
+
+    Tempfile.open 'something' do |file|
       @module.write_bitcode file
+
+      rasm,wasm = IO.pipe
+      spawn 'llc-3.5', in: file, out: wasm
+      spawn 'as', '-o', filename, '-', in: rasm
+
+      Process.wait
     end
   end
 
