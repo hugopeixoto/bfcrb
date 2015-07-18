@@ -1,0 +1,19 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    ffi (1.9.10)
+    polyglot (0.3.4)
+    rake (10.4.2)
+    ruby-llvm (3.5.0)
+      ffi (~> 1.9.3)
+      rake (~> 10.0)
+    treetop (1.4.15)
+      polyglot
+      polyglot (>= 0.3.1)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  ruby-llvm
+  treetop

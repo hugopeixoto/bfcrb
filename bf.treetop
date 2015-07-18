@@ -1,0 +1,57 @@
+grammar Brainfuck
+  rule sequence
+    first:statement second:sequence {
+      def to_ast
+        Sequence.new first.to_ast, second.to_ast
+      end
+    }
+    /
+    statement
+  end
+
+  rule statement
+    comment
+    /
+    real_statement
+  end
+
+  rule comment
+    [^,.<>\[\]+-]+ { def to_ast; Comment.new end }
+  end
+
+  rule real_statement
+    while / inc / dec / read / write / fwd / rwd
+  end
+
+  rule while
+    '[' sequence ']' {
+      def to_ast
+        While.new sequence.to_ast
+      end
+    }
+  end
+
+  rule inc
+    '+' { def to_ast; Increment.new end }
+  end
+
+  rule dec
+    '-' { def to_ast; Decrement.new end }
+  end
+
+  rule read
+    ',' { def to_ast; Read.new end }
+  end
+
+  rule write
+    '.' { def to_ast; Write.new end }
+  end
+
+  rule fwd
+    '>' { def to_ast; Forward.new end }
+  end
+
+  rule rwd
+    '<' { def to_ast; Rewind.new end }
+  end
+end
