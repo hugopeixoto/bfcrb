@@ -23,9 +23,11 @@ class Comment
   end
 end
 
-class Sequence < Struct.new(:first, :second)
+class Sequence < Struct.new(:statements)
   def evaluate cell
-    second.evaluate(first.evaluate(cell))
+    statements.reduce(cell) do |cell, statement|
+      statement.evaluate(cell)
+    end
   end
 end
 

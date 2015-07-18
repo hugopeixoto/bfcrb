@@ -1,12 +1,10 @@
 grammar Brainfuck
   rule sequence
-    first:statement second:sequence {
+    statements:statement* {
       def to_ast
-        Sequence.new first.to_ast, second.to_ast
+        Sequence.new statements.elements.map(&:to_ast)
       end
     }
-    /
-    statement
   end
 
   rule statement
