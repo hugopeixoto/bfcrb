@@ -15,12 +15,17 @@ class Generator
 
   CellType = LLVM::Int8
   Cell = Type.struct([], false, "cell_t").tap do |c|
-    c.element_types = [CellType, Type.pointer(c), Type.pointer(c)]
+    c.element_types = [CellType, c.pointer, c.pointer]
   end
 
-  CellPointer = Type.pointer(Cell)
+  CellPointer = Cell.pointer
 
   Block = Struct.new(:head, :tail)
+
+  Zero = LLVM::Int(0)
+
+  StdOut = LLVM::Int(1)
+  StdIn  = LLVM::Int(0)
 
   attr_accessor :module, :current_function, :current_block, :blocks, :functions
   def initialize
@@ -28,8 +33,10 @@ class Generator
     @functions = OpenStruct.new
 
     functions.printf = @module.functions.add('printf', Type.function([PCHAR], LLVM::Int32, varargs: true))
+    functions.read = @module.functions.add('read', Type.function([LLVM::Int, Type.pointer(LLVM::Int8), LLVM::Int], LLVM::Int))
+    functions.write = @module.functions.add('write', Type.function([LLVM::Int, Type.pointer(LLVM::Int8), LLVM::Int], LLVM::Int))
 
-    functions.main = @module.functions.add("main", Type.function([LLVM::Int32, Type.pointer(PCHAR)], LLVM::Int32))
+    functions.main = @module.functions.add("main", Type.function([LLVM::Int32, PCHAR.pointer], LLVM::Int32))
 
     @current_function = functions.main
 
@@ -142,9 +149,13 @@ class Generator
     b.extract_value(b.load(b.load(@ppcell)), 0)
   end
 
+  def current_value_ptr b
+    b.gep(b.load(@ppcell), [Zero, Zero])
+  end
+
   def finish
     current_block.build do |b|
-      b.ret(LLVM::Int(0))
+      b.ret(Zero)
     end
   end
 
@@ -211,9 +222,13 @@ class Generator
 
   def write
     current_block.build do |b|
-      b.call(functions.printf, b.global_string_pointer("%c"), current_value(b))
+      b.call(functions.write, StdOut, current_value_ptr(b), LLVM::Int.from_i(1))
     end
   end
 
-  def read; end
+  def read
+    current_block.build do |b|
+      b.call(functions.read, StdIn, current_value_ptr(b), LLVM::Int.from_i(1))
+    end
+  end
 end
