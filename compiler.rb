@@ -75,6 +75,3 @@ Generator.new.tap do |g|
 
   g.save ARGV[1]
 end
-
-
-
