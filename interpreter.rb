@@ -84,6 +84,7 @@ end
 
 class Read < Node
   def evaluate cell
+    cell.value = STDIN.getbyte || 0
     cell
   end
 end
