@@ -63,13 +63,10 @@ class Generator
         "cell_init",
         Type.function([CellPointer], Type.void)) do |f, cell_ptr|
       f.basic_blocks.append.build do |b|
-        cell = b.load(cell_ptr)
 
-        cell = b.insert_value(cell, CellType.from_i(0), 0)
-        cell = b.insert_value(cell, CellPointer.null, 1)
-        cell = b.insert_value(cell, CellPointer.null, 2)
-
-        b.store(cell, cell_ptr)
+        b.store(CellType.from_i(0), b.gep(cell_ptr, [Zero, Zero]))
+        b.store(CellPointer.null,   b.gep(cell_ptr, [Zero, One]))
+        b.store(CellPointer.null,   b.gep(cell_ptr, [Zero, Two]))
 
         b.ret_void
       end
@@ -111,11 +108,8 @@ class Generator
     initialize.build do |b|
       prev_ptr = b.load(new_cell_pointer_ref(b))
 
-      prev = b.insert_value(b.load(prev_ptr), cell_ptr, 3-idx)
-      b.store(prev, prev_ptr)
-
-      cell = b.insert_value(b.load(cell_ptr), prev_ptr, idx)
-      b.store(cell, cell_ptr)
+      b.store(cell_ptr, b.gep(prev_ptr, [Zero, LLVM::Int.from_i(3-idx)]))
+      b.store(prev_ptr, b.gep(cell_ptr, [Zero, LLVM::Int.from_i(idx)]))
 
       b.ret(prev_ptr)
     end
@@ -141,12 +135,16 @@ class Generator
     cell_ptr_ptr
   end
 
-  def current_value b
-    b.extract_value(b.load(b.load(@ppcell)), 0)
+  def current_cell_ptr b
+    b.load(@ppcell)
   end
 
   def current_value_ptr b
-    b.gep(b.load(@ppcell), [Zero, Zero])
+    b.gep(current_cell_ptr(b), [Zero, Zero])
+  end
+
+  def current_value b
+    b.load(current_value_ptr(b))
   end
 
   def finish
@@ -165,12 +163,7 @@ class Generator
 
   def apply_delta_to_current_value delta
     current_block.build do |b|
-      pcell = b.load(@ppcell)
-      cell = b.load(pcell)
-
-      cell = b.insert_value(cell, b.add(b.extract_value(cell, 0), CellType.from_i(delta)), 0)
-
-      b.store(cell, pcell)
+      b.store(b.add(current_value(b), CellType.from_i(delta)), current_value_ptr(b))
     end
   end
 
