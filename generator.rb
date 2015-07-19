@@ -2,17 +2,13 @@ require 'ostruct'
 require 'llvm/core'
 
 class Generator
-  include LLVM
-
   Int8 = LLVM::Int8.type
   PCHAR = Int8.pointer
 
   CellType = LLVM::Int8
-  Cell = Type.struct([], false, "cell_t").tap do |c|
+  Cell = LLVM::Type.struct([], false, "cell_t").tap do |c|
     c.element_types = [CellType, c.pointer, c.pointer]
   end
-
-  CellPointer = Cell.pointer
 
   Block = Struct.new(:head, :tail)
 
@@ -20,19 +16,22 @@ class Generator
   One  = LLVM::Int(1)
   Two  = LLVM::Int(2)
 
-  StdOut = LLVM::Int(1)
-  StdIn  = LLVM::Int(0)
+  StdOut = One
+  StdIn  = Zero
 
   attr_accessor :module, :current_function, :current_block, :blocks, :functions
+
+  def register_function name, args, ret, &block
+    functions[name] = @module.functions.add(name, LLVM::Type.function(args, ret), &block)
+  end
+
   def initialize
     @module = LLVM::Module.new("bfcrb")
     @functions = OpenStruct.new
 
-    functions.printf = @module.functions.add('printf', Type.function([PCHAR], LLVM::Int32, varargs: true))
-    functions.read = @module.functions.add('read', Type.function([LLVM::Int, Int8.pointer, LLVM::Int], LLVM::Int))
-    functions.write = @module.functions.add('write', Type.function([LLVM::Int, Int8.pointer, LLVM::Int], LLVM::Int))
-
-    functions.main = @module.functions.add("main", Type.function([LLVM::Int32, PCHAR.pointer], LLVM::Int32))
+    register_function('read',  [LLVM::Int, Int8.pointer, LLVM::Int], LLVM::Int)
+    register_function('write', [LLVM::Int, Int8.pointer, LLVM::Int], LLVM::Int)
+    register_function("main",  [LLVM::Int32, PCHAR.pointer], LLVM::Int32)
 
     @current_function = functions.main
 
@@ -59,36 +58,28 @@ class Generator
   end
 
   def setup_cell_functions
-    functions.cell_init = @module.functions.add(
-        "cell_init",
-        Type.function([CellPointer], Type.void)) do |f, cell_ptr|
+    register_function("cell_init", [Cell.pointer], LLVM::Type.void) do |f, cell_ptr|
       f.basic_blocks.append.build do |b|
 
         b.store(CellType.from_i(0), b.gep(cell_ptr, [Zero, Zero]))
-        b.store(CellPointer.null,   b.gep(cell_ptr, [Zero, One]))
-        b.store(CellPointer.null,   b.gep(cell_ptr, [Zero, Two]))
+        b.store(Cell.pointer.null,  b.gep(cell_ptr, [Zero, One]))
+        b.store(Cell.pointer.null,  b.gep(cell_ptr, [Zero, Two]))
 
         b.ret_void
       end
     end
 
-    functions.cell_alloc = @module.functions.add(
-        "cell_alloc",
-        Type.function([], CellPointer)) do |f|
+    register_function("cell_alloc", [], Cell.pointer) do |f|
       f.basic_blocks.append.build do |b|
         b.ret(b.malloc(Cell))
       end
     end
 
-    functions.cell_next = @module.functions.add(
-        "cell_next",
-        Type.function([CellPointer], CellPointer)) do |f, cell_ptr|
+    register_function("cell_next", [Cell.pointer], Cell.pointer) do |f, cell_ptr|
       generate_cell_moving_function f, cell_ptr, 1
     end
 
-    functions.cell_prev = @module.functions.add(
-        "cell_prev",
-        Type.function([CellPointer], CellPointer)) do |f, cell_ptr|
+    register_function("cell_prev", [Cell.pointer], Cell.pointer) do |f, cell_ptr|
       generate_cell_moving_function f, cell_ptr, 2
     end
   end
@@ -100,7 +91,7 @@ class Generator
 
     entry.build do |b|
       b.cond(
-        b.icmp(:eq, b.extract_value(b.load(cell_ptr), idx), CellPointer.null),
+        b.icmp(:eq, b.extract_value(b.load(cell_ptr), idx), Cell.pointer.null),
         initialize,
         return_existing)
     end
@@ -128,7 +119,7 @@ class Generator
   end
 
   def new_cell_pointer_ref b
-    cell_ptr_ptr = b.alloca(CellPointer)
+    cell_ptr_ptr = b.alloca(Cell.pointer)
     b.store(b.call(functions.cell_alloc), cell_ptr_ptr)
     b.call(functions.cell_init, b.load(cell_ptr_ptr))
 
