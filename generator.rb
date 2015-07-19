@@ -1,17 +1,11 @@
 require 'ostruct'
-
-require 'llvm'
-require 'llvm/core/module'
-require 'llvm/core/type'
-require 'llvm/core/value'
-require 'llvm/core/builder'
-require 'llvm/core/bitcode'
-require 'llvm/core/context'
+require 'llvm/core'
 
 class Generator
   include LLVM
 
-  PCHAR = Type.pointer(LLVM::Int8)
+  Int8 = LLVM::Int8.type
+  PCHAR = Int8.pointer
 
   CellType = LLVM::Int8
   Cell = Type.struct([], false, "cell_t").tap do |c|
@@ -23,6 +17,8 @@ class Generator
   Block = Struct.new(:head, :tail)
 
   Zero = LLVM::Int(0)
+  One  = LLVM::Int(1)
+  Two  = LLVM::Int(2)
 
   StdOut = LLVM::Int(1)
   StdIn  = LLVM::Int(0)
@@ -33,8 +29,8 @@ class Generator
     @functions = OpenStruct.new
 
     functions.printf = @module.functions.add('printf', Type.function([PCHAR], LLVM::Int32, varargs: true))
-    functions.read = @module.functions.add('read', Type.function([LLVM::Int, Type.pointer(LLVM::Int8), LLVM::Int], LLVM::Int))
-    functions.write = @module.functions.add('write', Type.function([LLVM::Int, Type.pointer(LLVM::Int8), LLVM::Int], LLVM::Int))
+    functions.read = @module.functions.add('read', Type.function([LLVM::Int, Int8.pointer, LLVM::Int], LLVM::Int))
+    functions.write = @module.functions.add('write', Type.function([LLVM::Int, Int8.pointer, LLVM::Int], LLVM::Int))
 
     functions.main = @module.functions.add("main", Type.function([LLVM::Int32, PCHAR.pointer], LLVM::Int32))
 
