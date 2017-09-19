@@ -1,8 +1,8 @@
 #!/usr/bin/env ruby
 
-require_relative '../generator'
-require_relative '../parser'
-require_relative '../transformer'
+require_relative '../lib/generator'
+require_relative '../lib/parser'
+require_relative '../lib/transformer'
 
 
 ast = Parser.new.parse(ARGF.read)
