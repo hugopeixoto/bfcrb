@@ -1,41 +1,48 @@
 require 'ostruct'
 require 'llvm/core'
+require 'tempfile'
 
-class Generator
-  Int8 = LLVM::Int8.type
-  PCHAR = Int8.pointer
+module Types
+  module Cell
+    Value = LLVM::Int8
+    Struct = LLVM::Type.struct([], false, "cell_t").tap do |c|
+      c.element_types = [Value, c.pointer, c.pointer]
+    end
 
-  CellType = LLVM::Int8
-  Cell = LLVM::Type.struct([], false, "cell_t").tap do |c|
-    c.element_types = [CellType, c.pointer, c.pointer]
+    ValueOffset = LLVM::Int(0)
+    NextOffset = LLVM::Int(1)
+    PrevOffset = LLVM::Int(2)
   end
 
+  module InstructionCounter
+    Value = LLVM::Int32
+  end
+end
+
+class Generator
   Block = Struct.new(:head, :tail)
 
   Zero = LLVM::Int(0)
-  One  = LLVM::Int(1)
-  Two  = LLVM::Int(2)
 
-  StdOut = One
-  StdIn  = Zero
+  StdIn  = LLVM::Int(0)
+  StdOut  = LLVM::Int(1)
+  StdErr  = LLVM::Int(2)
 
-  attr_accessor :module, :current_function, :current_block, :blocks, :functions
+  attr_accessor :module, :current_block, :blocks, :functions
 
-  def register_function name, args, ret, &block
-    functions[name] = @module.functions.add(name, LLVM::Type.function(args, ret), &block)
+  def register_function name, args, ret, opts = {}, &block
+    functions[name] = @module.functions.add(name, LLVM::Type.function(args, ret, opts), &block)
   end
 
   def initialize
     @module = LLVM::Module.new("bfcrb")
     @functions = OpenStruct.new
 
-    register_function('read',  [LLVM::Int, Int8.pointer, LLVM::Int], LLVM::Int)
-    register_function('write', [LLVM::Int, Int8.pointer, LLVM::Int], LLVM::Int)
-    register_function("main",  [LLVM::Int32, PCHAR.pointer], LLVM::Int32)
+    register_function("read",  [LLVM::Int, LLVM::Int8.type.pointer, LLVM::Int], LLVM::Int)
+    register_function("write", [LLVM::Int, LLVM::Int8.type.pointer, LLVM::Int], LLVM::Int)
+    register_function("main",  [LLVM::Int32, LLVM::Int8.type.pointer.pointer], LLVM::Int32)
 
-    @current_function = functions.main
-
-    block = @current_function.basic_blocks.append("entry")
+    block = functions.main.basic_blocks.append
     @blocks = [Block.new(block, block)]
   end
 
@@ -43,55 +50,60 @@ class Generator
     blocks.last.tail
   end
 
-  def save filename=nil
-    filename ||= 'a.out'
-
-    Tempfile.open 'something' do |file|
-      @module.write_bitcode file
-
-      rasm,wasm = IO.pipe
-      spawn 'llc-3.5', in: file, out: wasm
-      spawn 'as', '-o', filename, '-', in: rasm
-
-      Process.wait
-    end
-  end
-
   def setup_cell_functions
-    register_function("cell_init", [Cell.pointer], LLVM::Type.void) do |f, cell_ptr|
+    register_function(
+      "cell_init",
+      [Types::Cell::Struct.pointer],
+      LLVM::Type.void,
+    ) do |f, cell_ptr|
       f.basic_blocks.append.build do |b|
-
-        b.store(CellType.from_i(0), b.gep(cell_ptr, [Zero, Zero]))
-        b.store(Cell.pointer.null,  b.gep(cell_ptr, [Zero, One]))
-        b.store(Cell.pointer.null,  b.gep(cell_ptr, [Zero, Two]))
+        [
+          Types::Cell::Value.from_i(0),
+          Types::Cell::Struct.pointer.null,
+          Types::Cell::Struct.pointer.null,
+        ].each_with_index do |value, index|
+          b.store(value, b.gep(cell_ptr, [Zero, LLVM::Int(index)]))
+        end
 
         b.ret_void
       end
     end
 
-    register_function("cell_alloc", [], Cell.pointer) do |f|
+    register_function(
+      "cell_alloc",
+      [],
+      Types::Cell::Struct.pointer,
+    ) do |f|
       f.basic_blocks.append.build do |b|
-        b.ret(b.malloc(Cell))
+        b.ret(b.malloc(Types::Cell::Struct))
       end
     end
 
-    register_function("cell_next", [Cell.pointer], Cell.pointer) do |f, cell_ptr|
+    register_function(
+      "cell_next",
+      [Types::Cell::Struct.pointer],
+      Types::Cell::Struct.pointer,
+    ) do |f, cell_ptr|
       generate_cell_moving_function f, cell_ptr, 1
     end
 
-    register_function("cell_prev", [Cell.pointer], Cell.pointer) do |f, cell_ptr|
+    register_function(
+      "cell_prev",
+      [Types::Cell::Struct.pointer],
+      Types::Cell::Struct.pointer,
+    ) do |f, cell_ptr|
       generate_cell_moving_function f, cell_ptr, 2
     end
   end
 
   def generate_cell_moving_function f, cell_ptr, idx
-    entry           = f.basic_blocks.append
-    initialize      = f.basic_blocks.append
+    entry = f.basic_blocks.append
+    initialize = f.basic_blocks.append
     return_existing = f.basic_blocks.append
 
     entry.build do |b|
       b.cond(
-        b.icmp(:eq, b.extract_value(b.load(cell_ptr), idx), Cell.pointer.null),
+        b.icmp(:eq, b.extract_value(b.load(cell_ptr), idx), Types::Cell::Struct.pointer.null),
         initialize,
         return_existing)
     end
@@ -114,24 +126,20 @@ class Generator
     setup_cell_functions
 
     current_block.build do |b|
-      @ppcell = new_cell_pointer_ref b
+      @current_cell_ptr = new_cell_pointer_ref b
     end
   end
 
   def new_cell_pointer_ref b
-    cell_ptr_ptr = b.alloca(Cell.pointer)
+    cell_ptr_ptr = b.alloca(Types::Cell::Struct.pointer)
     b.store(b.call(functions.cell_alloc), cell_ptr_ptr)
     b.call(functions.cell_init, b.load(cell_ptr_ptr))
 
     cell_ptr_ptr
   end
 
-  def current_cell_ptr b
-    b.load(@ppcell)
-  end
-
   def current_value_ptr b
-    b.gep(current_cell_ptr(b), [Zero, Zero])
+    b.gep(b.load(@current_cell_ptr), [Zero, Types::Cell::ValueOffset])
   end
 
   def current_value b
@@ -154,24 +162,24 @@ class Generator
 
   def apply_delta_to_current_value delta
     current_block.build do |b|
-      b.store(b.add(current_value(b), CellType.from_i(delta)), current_value_ptr(b))
+      b.store(b.add(current_value(b), Types::Cell::Value.from_i(delta)), current_value_ptr(b))
     end
   end
 
   def forward
     current_block.build do |b|
-      b.store(b.call(functions.cell_next, b.load(@ppcell)), @ppcell)
+      b.store(b.call(functions.cell_next, b.load(@current_cell_ptr)), @current_cell_ptr)
     end
   end
 
-  def rewind
+  def backward
     current_block.build do |b|
-      b.store(b.call(functions.cell_prev, b.load(@ppcell)), @ppcell)
+      b.store(b.call(functions.cell_prev, b.load(@current_cell_ptr)), @current_cell_ptr)
     end
   end
 
   def loop_start
-    loop_block = current_function.basic_blocks.append
+    loop_block = functions.main.basic_blocks.append
 
     blocks.push(Block.new(loop_block, loop_block))
   end
@@ -179,8 +187,8 @@ class Generator
   def loop_finish
     loop_block = blocks.pop
 
-    escape_block = current_function.basic_blocks.append
-    check = current_function.basic_blocks.append
+    check = functions.main.basic_blocks.append
+    escape_block = functions.main.basic_blocks.append
 
     loop_block.tail.build do |b|
       b.br(check)
@@ -192,7 +200,7 @@ class Generator
 
     check.build do |b|
       b.cond(
-        b.icmp(:eq, current_value(b), CellType.from_i(0)),
+        b.icmp(:eq, current_value(b), Types::Cell::Value.from_i(0)),
         escape_block,
         loop_block.head)
     end

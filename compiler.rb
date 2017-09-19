@@ -1,77 +1,17 @@
-require 'treetop'
-require_relative 'generator'
+require 'tempfile'
 
-Node = ::Treetop::Runtime::SyntaxNode
+class Compiler
+  def compile code_module, filename = 'a.out'
+    #code_module.dump
 
-class Node
-  def codegen g
-  end
-end
+    Tempfile.open do |file|
+      code_module.write_bitcode file
 
-class Program < Node
-  def codegen g
-    g.start
-    script.codegen g
-    g.finish
-  end
-end
+      rasm, wasm = IO.pipe
+      spawn "llc-#{LLVM::LLVM_VERSION}", "-relocation-model=pic", in: file, out: wasm
+      spawn 'as', '-o', filename, '-', in: rasm
 
-class Sequence < Node
-  def codegen g
-    statements.elements.each do |statement|
-      statement.codegen g
+      Process.wait
     end
   end
-end
-
-class While < Node
-  def codegen g
-    g.loop_start
-    body.codegen g
-    g.loop_finish
-  end
-end
-
-class Increment < Node
-  def codegen g
-    g.increment
-  end
-end
-
-class Decrement < Node
-  def codegen g
-    g.decrement
-  end
-end
-
-class Forward < Node
-  def codegen g
-    g.forward
-  end
-end
-
-class Rewind < Node
-  def codegen g
-    g.rewind
-  end
-end
-
-class Write < Node
-  def codegen g
-    g.write
-  end
-end
-
-class Read < Node
-  def codegen g
-    g.read
-  end
-end
-
-parser = Treetop.load('bf').new
-
-Generator.new.tap do |g|
-  parser.parse(File.read(ARGV[0])).codegen g
-
-  g.save ARGV[1]
 end
