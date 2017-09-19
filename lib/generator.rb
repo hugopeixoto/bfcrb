@@ -13,10 +13,6 @@ module Types
     NextOffset = LLVM::Int(1)
     PrevOffset = LLVM::Int(2)
   end
-
-  module InstructionCounter
-    Value = LLVM::Int32
-  end
 end
 
 class Generator
