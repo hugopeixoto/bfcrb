@@ -1,0 +1,14 @@
+#!/usr/bin/env ruby
+
+require_relative '../generator'
+require_relative '../parser'
+require_relative '../transformer'
+
+
+ast = Parser.new.parse(ARGF.read)
+ast = Transformer.new.apply(ast)
+
+generator = Generator.new
+ast.codegen generator
+
+puts generator.module.to_s
