@@ -1,27 +1,14 @@
 require 'ostruct'
 require 'llvm/core'
 
-module Types
-  module Cell
-    Value = LLVM::Int8
-    Struct = LLVM::Type.struct([], false, "cell_t").tap do |c|
-      c.element_types = [Value, c.pointer, c.pointer]
-    end
-
-    ValueOffset = LLVM::Int(0)
-    NextOffset = LLVM::Int(1)
-    PrevOffset = LLVM::Int(2)
-  end
-end
-
 class Generator
-  Block = Struct.new(:head, :tail)
-
   Zero = LLVM::Int(0)
 
   StdIn = LLVM::Int(0)
   StdOut = LLVM::Int(1)
   StdErr = LLVM::Int(2)
+
+  PageSize = LLVM::Int(4096)
 
   attr_accessor :module, :blocks, :functions
 
@@ -44,38 +31,54 @@ class Generator
   end
 
   def increment
-    apply_delta_to_current_value 1
+    apply_delta_to_current_value LLVM::Int8.from_i(1)
   end
 
   def decrement
-    apply_delta_to_current_value -1
+    apply_delta_to_current_value LLVM::Int8.from_i(-1)
   end
 
   def forward
     current_block.build do |b|
-      b.call(functions.cell_next)
+      b.call(functions.cell_move, LLVM::Int.from_i(1))
     end
   end
 
   def backward
     current_block.build do |b|
-      b.call(functions.cell_prev)
+      b.call(functions.cell_move, LLVM::Int.from_i(-1))
+    end
+  end
+
+  def write
+    current_block.build do |b|
+      cell_ptr = current_value_ptr(b)
+
+      b.call(functions.write, StdOut, cell_ptr, LLVM::Int.from_i(1))
+    end
+  end
+
+  def read
+    current_block.build do |b|
+      cell_ptr = current_value_ptr(b)
+
+      b.call(functions.read, StdIn, cell_ptr, LLVM::Int.from_i(1))
     end
   end
 
   def loop_start
     loop_block = functions.main.basic_blocks.append
 
-    blocks.push(Block.new(loop_block, loop_block))
+    blocks.push([loop_block, loop_block])
   end
 
   def loop_finish
-    loop_block = blocks.pop
+    loop_start_block, loop_finish_block = blocks.pop
 
     check_block = functions.main.basic_blocks.append
     escape_block = functions.main.basic_blocks.append
 
-    loop_block.tail.build do |b|
+    loop_finish_block.build do |b|
       b.br(check_block)
     end
 
@@ -85,38 +88,29 @@ class Generator
 
     check_block.build do |b|
       b.cond(
-        b.icmp(:eq, current_value(b), Types::Cell::Value.from_i(0)),
+        b.icmp(:eq, current_value(b), LLVM::Int8.from_i(0)),
         escape_block,
-        loop_block.head)
+        loop_start_block)
     end
 
-    blocks.last.tail = escape_block
-  end
-
-  def write
-    current_block.build do |b|
-      b.call(functions.write, StdOut, current_value_ptr(b), LLVM::Int.from_i(1))
-    end
-  end
-
-  def read
-    current_block.build do |b|
-      b.call(functions.read, StdIn, current_value_ptr(b), LLVM::Int.from_i(1))
-    end
+    blocks.last[1] = escape_block
   end
 
   private
+  def current_block
+    blocks.last[1]
+  end
+
   def apply_delta_to_current_value delta
     current_block.build do |b|
-      b.store(
-        b.add(current_value(b), Types::Cell::Value.from_i(delta)),
-        current_value_ptr(b),
-      )
+      cell_ptr = current_value_ptr(b)
+
+      b.store(b.add(b.load(cell_ptr), delta), cell_ptr)
     end
   end
 
   def current_value_ptr b
-    b.gep(b.load(@cell), [Zero, Types::Cell::ValueOffset])
+    b.gep(b.load(@tape), [b.load(@index)])
   end
 
   def current_value b
@@ -124,24 +118,85 @@ class Generator
   end
 
   def setup_global_state
-    @cell = @module.globals.add(Types::Cell::Struct.pointer, :cell_ptr) do |var|
+    @tape = @module.globals.add(LLVM::Int8.type.pointer, :tape) do |var|
       var.linkage = :private
       var.initializer = var.type.null
+    end
+
+    @size = @module.globals.add(LLVM::Int, :size) do |var|
+      var.linkage = :private
+      var.initializer = PageSize
+    end
+
+    @index = @module.globals.add(LLVM::Int, :index) do |var|
+      var.linkage = :private
+      var.initializer = Zero
     end
   end
 
   def setup_external_functions
-    register_function("read", [LLVM::Int, LLVM::Int8.type.pointer, LLVM::Int], LLVM::Int)
-    register_function("write", [LLVM::Int, LLVM::Int8.type.pointer, LLVM::Int], LLVM::Int)
+    {
+      "read" => [[LLVM::Int, LLVM::Int8.type.pointer, LLVM::Int], LLVM::Int],
+      "write" => [[LLVM::Int, LLVM::Int8.type.pointer, LLVM::Int], LLVM::Int],
+      "realloc" => [[LLVM::Int8.type.pointer, LLVM::Int], LLVM::Int8.type.pointer],
+      "memset" => [[LLVM::Int8.type.pointer, LLVM::Int8.type, LLVM::Int], LLVM::Int8.type.pointer],
+      "memmove" => [[LLVM::Int8.type.pointer, LLVM::Int8.type.pointer, LLVM::Int], LLVM::Int8.type.pointer],
+    }.each do |name, (args, ret)|
+      register_function(name, args, ret)
+    end
+
+    register_function("dprintf", [LLVM::Int, LLVM::Int8.type.pointer], LLVM::Int, varargs: true)
   end
 
   def setup_cell_functions
-    register_function("cell_next", [], LLVM::Type.void) do |f|
-      generate_cell_moving_function f, 1
-    end
+    register_function("cell_move", [LLVM::Int], LLVM::Type.void) do |f, delta|
+      fwd_check_block = f.basic_blocks.append
+      bwd_check_block = f.basic_blocks.append
+      fwd_expand_block = f.basic_blocks.append
+      bwd_expand_block = f.basic_blocks.append
+      return_block = f.basic_blocks.append
 
-    register_function("cell_prev", [], LLVM::Type.void) do |f|
-      generate_cell_moving_function f, 2
+      fwd_check_block.build do |b|
+        b.store(b.add(b.load(@index), delta), @index)
+        b.cond(
+          b.icmp(:slt, b.load(@index), b.load(@size)),
+          bwd_check_block,
+          fwd_expand_block,
+        )
+      end
+
+      bwd_check_block.build do |b|
+        b.cond(
+          b.icmp(:slt, b.load(@index), Zero),
+          bwd_expand_block,
+          return_block,
+        )
+      end
+
+      fwd_expand_block.build do |b|
+        final_size = b.add(b.load(@size), PageSize)
+        b.store(b.call(functions.realloc, b.load(@tape), final_size), @tape)
+
+        b.call(functions.memset, b.gep(b.load(@tape), [b.load(@size)]), LLVM::Int8.from_i(0), PageSize)
+        b.store(final_size, @size)
+        b.ret_void
+      end
+
+      bwd_expand_block.build do |b|
+        final_size = b.add(b.load(@size), PageSize)
+        b.store(b.call(functions.realloc, b.load(@tape), final_size), @tape)
+
+        b.call(functions.memmove, b.gep(b.load(@tape), [PageSize]), b.gep(b.load(@tape), [Zero]), b.load(@size))
+        b.call(functions.memset, b.gep(b.load(@tape), [Zero]), LLVM::Int8.from_i(0), PageSize)
+
+        b.store(final_size, @size)
+        b.store(b.add(b.load(@index), PageSize), @index)
+        b.ret_void
+      end
+
+      return_block.build do |b|
+        b.ret_void
+      end
     end
   end
 
@@ -153,60 +208,13 @@ class Generator
     )
 
     block = functions.main.basic_blocks.append
-    @blocks = [Block.new(block, block)]
+    @blocks = [[block, block]]
 
     current_block.build do |b|
-      b.store(b.malloc(Types::Cell::Struct), @cell)
+      b.store(b.array_malloc(LLVM::Int8, PageSize, "tape"), @tape)
 
-      [
-        Types::Cell::Value.from_i(0),
-        Types::Cell::Struct.pointer.null,
-        Types::Cell::Struct.pointer.null,
-      ].each_with_index do |value, index|
-        b.store(
-          value,
-          b.gep(b.load(@cell), [Zero, LLVM::Int.from_i(index)]),
-        )
-      end
+      b.call(functions.memset, b.load(@tape), LLVM::Int8.from_i(0), PageSize)
     end
-  end
-
-  def generate_cell_moving_function f, idx
-    entry = f.basic_blocks.append
-    initialize = f.basic_blocks.append
-    return_existing = f.basic_blocks.append
-
-    entry.build do |b|
-      b.cond(
-        b.icmp(
-          :eq,
-          b.load(b.gep(b.load(@cell), [Zero, LLVM::Int.from_i(idx)])),
-          Types::Cell::Struct.pointer.null
-        ),
-        initialize,
-        return_existing)
-    end
-
-    initialize.build do |b|
-      new_cell_ptr = b.alloca(Types::Cell::Struct.pointer)
-      b.store(b.malloc(Types::Cell::Struct), new_cell_ptr)
-
-      b.store(Types::Cell::Value.from_i(0), b.gep(b.load(new_cell_ptr), [Zero, Types::Cell::ValueOffset]))
-      b.store(b.load(@cell), b.gep(b.load(new_cell_ptr), [Zero, LLVM::Int.from_i(3-idx)]))
-      b.store(b.load(new_cell_ptr), b.gep(b.load(@cell), [Zero, LLVM::Int.from_i(idx)]))
-
-      b.store(b.load(new_cell_ptr), @cell)
-      b.ret_void
-    end
-
-    return_existing.build do |b|
-      b.store(b.load(b.gep(b.load(@cell), [Zero, LLVM::Int.from_i(idx)])), @cell)
-      b.ret_void
-    end
-  end
-
-  def current_block
-    blocks.last.tail
   end
 
   def register_function(name, args, ret, opts = {}, &block)
